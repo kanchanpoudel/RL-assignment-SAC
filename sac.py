@@ -42,14 +42,13 @@ class ReplayBuffer:
         )
 
     def __len__(self):
-        # Return the current number of experiences in the buffer
         return self.size if self.full else self.ptr
 
 
-
 class Actor(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim=256):
+    def __init__(self, state_dim, action_dim, hidden_dim=256, reparameterize=True):
         super(Actor, self).__init__()
+        self.reparameterize = reparameterize
         self.net = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
@@ -65,9 +64,13 @@ class Actor(nn.Module):
         mean = self.forward(state)
         std = torch.ones_like(mean).to(device) * 0.1  # Fixed std for simplicity
         dist = Normal(mean, std)
-        action = dist.sample()
+        if self.reparameterize:
+            action = dist.rsample()  # Reparameterization trick
+        else:
+            action = dist.sample()
         log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True)
         return action, log_prob
+
 
 class QNetwork(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=256):
@@ -83,9 +86,10 @@ class QNetwork(nn.Module):
     def forward(self, state, action):
         return self.net(torch.cat([state, action], dim=-1))
 
+
 class SAC:
-    def __init__(self, state_dim, action_dim, lr=3e-4, gamma=0.99, tau=0.005, alpha=0.2):
-        self.actor = Actor(state_dim, action_dim).to(device)
+    def __init__(self, state_dim, action_dim, lr=3e-3, gamma=0.99, tau=0.005, alpha=0.2, reparameterize=True):
+        self.actor = Actor(state_dim, action_dim, reparameterize=reparameterize).to(device)
         self.q1 = QNetwork(state_dim, action_dim).to(device)
         self.q2 = QNetwork(state_dim, action_dim).to(device)
         self.q1_target = QNetwork(state_dim, action_dim).to(device)
@@ -145,29 +149,28 @@ class SAC:
             target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
 
 
-
 def main():
-    parser = argparse.ArgumentParser()  # Replace OptionParser with ArgumentParser
+    parser = argparse.ArgumentParser()
     parser.add_argument('-e', '--env', action='store', type=str,
-                    dest='env_name', default="Pendulum-v1",
-                    )  
-
+                        dest='env_name', default="Pendulum-v1", )  
     parser.add_argument('-s', '--seed', action='store', type=int, 
-                        dest='seed', default=None, 
-                        )
-    args = parser.parse_args()  # Replacing optparse with argparse
+                        dest='seed', default=None, )
+    parser.add_argument('--lr', action='store', type=float, dest='lr', default=3e-3)
+    parser.add_argument('--alpha', action='store', type=float, dest='alpha', default=0.2)
+    args = parser.parse_args()
 
     env_name = args.env_name
     env = gym.make(env_name)
     state_dim = env.observation_space.shape[0]
-    action_dim = env.observation_space.shape[0]  # typo - should be action_space but works anyway
+    action_dim = env.action_space.shape[0]
     
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
+        env.seed(args.seed)
 
     replay_buffer = ReplayBuffer(state_dim, action_dim, size=int(1e6))
-    sac = SAC(state_dim, action_dim)
+    sac = SAC(state_dim, action_dim, lr=args.lr, alpha=args.alpha)
 
     episodes = 0
     max_episodes = 1000
@@ -204,7 +207,7 @@ def main():
             print(f"Episode {episodes}, avg reward: {avg_reward:.2f}")
 
         if episode_reward > solved_reward:
-            print("Solved!")
+            print(f"Solved in episode {episodes}, with reward: {episode_reward}")
             break
 
 if __name__ == '__main__':
